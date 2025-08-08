@@ -1,0 +1,154 @@
+// ==UserScript==
+// @name         SVG Injector by TranslateX (Only Nested Solutions + Polygons) [Verbose Logging]
+// @namespace
+// @version      1.9
+// @description  Inject <g class="solutionX nostyle"> + <polygon> from SVG into .questionsContainer based on translateX%
+// @author       ChatGPT Drip
+// @match        *://*/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(() => {
+  'use strict';
+
+  const interceptedSVGsOrdered = [];
+
+  function logAndStore(url, source) {
+    if (!interceptedSVGsOrdered.includes(url)) {
+      interceptedSVGsOrdered.push(url);
+      console.log(`🚀 [${interceptedSVGsOrdered.length}] ${source} intercepted SVG URL:`, url);
+    }
+  }
+
+  const originalFetch = window.fetch;
+  window.fetch = function(resource, ...args) {
+    const url = (typeof resource === 'string') ? resource : resource.url;
+    if (url && url.endsWith('.svg')) logAndStore(url, 'fetch');
+    return originalFetch.call(this, resource, ...args);
+  };
+
+  const originalXHRopen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    if (url && url.endsWith('.svg')) logAndStore(url, 'XHR');
+    return originalXHRopen.call(this, method, url, ...rest);
+  };
+
+  window.getNthSVGUrl = n => interceptedSVGsOrdered[n - 1] || null;
+
+  function getTranslateXPercent(style) {
+    const match = style.match(/translateX\((-?\d+)%\)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  async function injectSolutionAndPolygons(svgUrl, questionNum) {
+    try {
+      console.log(`🔍 Starting injection for question-${questionNum} from: ${svgUrl}`);
+
+      const questionDiv = document.querySelector(`#question-${questionNum}`);
+      if (!questionDiv) return console.warn(`❌ question div #question-${questionNum} not found`);
+
+      const container = questionDiv.querySelector('.questionsContainer');
+      if (!container) return console.warn(`❌ .questionsContainer inside #question-${questionNum} not found`);
+
+      const res = await fetch(svgUrl);
+      if (!res.ok) throw new Error(`Failed to fetch SVG from ${svgUrl}`);
+
+      const svgText = await res.text();
+      const parser = new DOMParser();
+      const svgDoc = parser.parseFromString(svgText, 'image/svg+xml');
+
+      console.log(`📄 SVG successfully parsed for question-${questionNum}`);
+
+      const questionGroups = Array.from(svgDoc.querySelectorAll('g[class^="question"]'));
+      console.log(`🔢 Found ${questionGroups.length} <g class="questionX"> groups`);
+
+      let injectedCount = 0;
+
+      for (const qGroup of questionGroups) {
+        const questionId = qGroup.dataset?.id;
+        if (!questionId) {
+          console.log('⚠️ Skipping <g> without data-id (likely malformed)');
+          continue;
+        }
+
+        const htmlQuestionGroup = container.querySelector(`g.${questionId}[data-id="${questionId}"]`);
+        if (!htmlQuestionGroup) {
+          console.warn(`⚠️ Could not find matching HTML <g class="${questionId}" data-id="${questionId}"> for injection`);
+          continue;
+        }
+
+        for (let i = 1; i <= 5; i++) {
+          const solutionId = `solution${i}`;
+          const solutionGroup = Array.from(qGroup.children).find(
+            g =>
+              g.tagName.toLowerCase() === 'g' &&
+              g.dataset?.id === solutionId &&
+              g.classList.contains(solutionId)
+          );
+
+          if (solutionGroup) {
+            htmlQuestionGroup.appendChild(solutionGroup.cloneNode(true));
+            injectedCount++;
+            console.log(`✅ Injected <g class="${solutionId}"> into HTML <g class="${questionId}">`);
+          } else {
+            console.warn(`❌ No matching <g class="${solutionId}" data-id="${solutionId}"> found as child of ${questionId}`);
+          }
+        }
+      }
+
+      const polygons = svgDoc.querySelectorAll('polygon');
+      polygons.forEach((p, i) => {
+        container.appendChild(p.cloneNode(true));
+        console.log(`✅ Injected polygon [${i + 1}/${polygons.length}]`);
+      });
+
+      console.log(`🎯 Summary: Injected ${injectedCount} solution group(s) + ${polygons.length} polygon(s) into #question-${questionNum}`);
+    } catch (err) {
+      console.error('💥 SVG fetch/inject failed:', err);
+    }
+  }
+
+  function watchTranslateX() {
+    const target = document.getElementById('svgui-content-host');
+    if (!target) return setTimeout(watchTranslateX, 500);
+
+    let lastIndex = null;
+
+    const observer = new MutationObserver(mutations => {
+      mutations.forEach(async mutation => {
+        if (mutation.attributeName === 'style') {
+          const style = target.getAttribute('style');
+          const translateX = getTranslateXPercent(style);
+          console.log(`📐 Detected style mutation. style="${style}", parsed translateX=${translateX}`);
+
+          if (translateX !== null) {
+            const index = 1 - (translateX / 100);
+            if (index !== lastIndex) {
+              lastIndex = index;
+              const questionNum = index;
+              const svgUrl = window.getNthSVGUrl(index);
+
+              console.log(`🔥 translateX is ${translateX}%, question #${questionNum}, injecting from SVG index ${index}: ${svgUrl}`);
+
+              if (svgUrl) {
+                await injectSolutionAndPolygons(svgUrl, questionNum);
+              } else {
+                console.warn(`⚠️ No SVG URL found for index ${index}`);
+              }
+            }
+          }
+        }
+      });
+    });
+
+    observer.observe(target, { attributes: true });
+    console.log('👀 MutationObserver active on #svgui-content-host');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', watchTranslateX);
+  } else {
+    watchTranslateX();
+  }
+})();
